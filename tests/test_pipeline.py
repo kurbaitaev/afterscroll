@@ -1654,20 +1654,12 @@ def test_answers_are_matched_to_shots_by_time_not_by_label():
 import content  # noqa: E402
 
 
-def test_variants_of_one_video_are_summed_and_the_best_one_linked():
-    """He posts several trial variants with one caption; they are one video."""
-    reels = [{"shortCode": "A", "ownerUsername": "kurbaitaev", "caption": "Парадокс Соломона…",
-              "videoPlayCount": 164, "likesCount": 1, "commentsCount": 0, "timestamp": "2026-10-19T06:52:00Z"},
-             {"shortCode": "B", "ownerUsername": "kurbaitaev", "caption": "Парадокс Соломона…",
-              "videoPlayCount": 2061, "likesCount": 37, "commentsCount": 1, "timestamp": "2026-10-19T06:50:56Z"},
-             {"shortCode": "C", "ownerUsername": "kurbaiitaev", "caption": "10/10 habits",
-              "videoPlayCount": 1783, "likesCount": -1, "commentsCount": 1, "timestamp": "2026-08-21T02:09:04Z"}]
-    groups = content.group_reels(reels)
-    assert len(groups) == 2
-    t = content.totals(groups["kurbaitaev:парадокс соломона"])
-    assert (t["views"], t["likes"], t["variants"]) == (2225, 38, 2)
-    assert t["best"].endswith("/reel/B/") and t["first"] == "2026-10-19"
-    assert content.totals(groups["kurbaiitaev:10 10 habits"])["likes"] == 0  # hidden likes come back as -1
+def test_content_links_require_the_exact_instagram_post_path():
+    assert content.instagram_code("https://www.instagram.com/reel/Ab_cd-1/?igsh=x") == "Ab_cd-1"
+    assert content.instagram_code("https://instagram.com/reels/Ab_cd-1/") == "Ab_cd-1"
+    assert content.instagram_code("https://instagram.com.evil.test/reel/Ab_cd-1/") is None
+    assert content.instagram_code("https://evil.test/?url=https://instagram.com/reel/Ab_cd-1/") is None
+    assert content.instagram_code("https://instagram.com/reel/Ab_cd-1/more") is None
 
 
 def test_a_bookmark_already_remade_is_not_drafted_twice():

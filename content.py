@@ -12,13 +12,10 @@ drafts (timer, every 15 min): a bookmark ticked "Worth remaking" that has no row
 in 💡 Content Ideas gets one — status Inbox, a Russian script close to the
 original, laid out like the scripts already there (big lines, read while filming).
 
-stats (timer, every 3 days): one Apify call lists the recent reels of both
-accounts, trial reels included. Variants of one video share a caption, so they
-are grouped; each group is matched to its Content row (by a link already on the
-row, else by the model comparing caption and script) and the row gets total
-views, likes, comments, the best variant's link and status Published. The views
-also land on the source bookmark ("Remake views"), so the saved reel shows what
-its remake did. Nothing is written when the scrape fails or comes back empty.
+stats (existing timer): only an Instagram shortcode in a row's Posted link
+selects that row. Unmatched reels never create rows. Views never decrease, and
+24h/72h snapshots are written once within twelve hours of their target age.
+No caption matching or model calls are used by stats.
 
 pick (run weekly from his laptop, Sundays): of the bot drafts still in Inbox, the one
 most like the remakes that beat his usual reel. It gets a close edit for speaking
@@ -28,6 +25,7 @@ a draft is never picked twice. Nothing is written when a model call fails.
 
 import argparse
 import datetime as dt
+import fcntl
 import json
 import logging
 import os
@@ -37,6 +35,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 PROJ = pathlib.Path(__file__).resolve().parent
@@ -52,20 +51,20 @@ CONTENT_DB = os.environ.get("CONTENT_DATABASE_ID", "821c50bb18f14c7ca1ae9f350376
 STATE = PROJ / "logs" / "content_state.json"
 REEL_ACTOR = "apify~instagram-reel-scraper"
 STATS_EVERY = dt.timedelta(days=3)
-NEW_ROW_WINDOW = dt.timedelta(days=7)  # unmatched reels younger than this get a row of their own
-MATCHABLE = {"Inbox", "ideas", "Researching", "Editing", "Scheduled", "Published", None}
+STATS_POLICY = "posted-link-v1"
 
 # Columns the stats pass owns. Created on first run; never touched otherwise.
 CONTENT_COLUMNS = {
     "Posted": {"url": {}},
     "Posted on": {"date": {}},
     "Views": {"number": {"format": "number_with_commas"}},
+    "Views 24h": {"number": {"format": "number_with_commas"}},
+    "Views 72h": {"number": {"format": "number_with_commas"}},
     "Likes": {"number": {"format": "number_with_commas"}},
     "Comments": {"number": {"format": "number_with_commas"}},
     "Variants": {"number": {}},
     "Stats updated": {"date": {}},
 }
-BOOKMARK_COLUMNS = {"Remake views": {"number": {"format": "number_with_commas"}}}
 
 
 # --- plumbing -------------------------------------------------------------------
@@ -174,7 +173,7 @@ def ask_claude(prompt: str, timeout: int = 600) -> dict:
 
 # The Russian remake drafts run on his OpenAI credits since 2026-11-08 (he wants all copywriting there).
 # A separate key name on purpose: OPENAI_API_KEY would also switch the bot's save agent (agent_openai.enabled()).
-# Any failure, or the daily cap, falls back to the Claude CLI; matching reels to rows stays on Claude.
+# Writer failures stop the draft; no other model is substituted.
 OPENAI_DRAFT_MODEL = os.environ.get("CONTENT_OPENAI_MODEL", "gpt-5.6-sol")
 OPENAI_USD_DAILY = float(os.environ.get("CONTENT_OPENAI_USD_DAILY", "2"))
 # $ per 1M tokens: input, cached input, output (developers.openai.com/api/docs/pricing, checked 2026-11-08; 5.6 Sol promo until Nov 30)
@@ -205,16 +204,21 @@ def ask_openai(prompt: str, timeout: int = 300) -> dict:
             "reasoning": {"effort": "medium"}, "text": {"format": {"type": "json_object"}}}
     req = urllib.request.Request("https://api.openai.com/v1/responses", data=json.dumps(body).encode(),
                                  headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 d = json.load(r)
             break
         except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 502, 503, 504) and attempt < 2:
+            if e.code in (429, 500, 502, 503, 504) and attempt < 1:
                 time.sleep(5 * (attempt + 1))
                 continue
-            raise RuntimeError(f"openai {e.code}: {e.read().decode()[:300]}")
+            raise RuntimeError(f"OpenAI HTTP {e.code}") from None
+        except (urllib.error.URLError, TimeoutError):
+            if attempt < 1:
+                time.sleep(5)
+                continue
+            raise RuntimeError("OpenAI connection timeout/unavailable") from None
     u = d.get("usage", {})
     pin, pcache, pout = OPENAI_PRICES.get(OPENAI_DRAFT_MODEL, (10, 1, 50))
     cached = (u.get("input_tokens_details") or {}).get("cached_tokens", 0)
@@ -229,21 +233,44 @@ def ask_openai(prompt: str, timeout: int = 300) -> dict:
     return json.loads(text)
 
 
+class WriterUnavailable(RuntimeError):
+    """No draft or pick may be committed after the required writer fails."""
+
+
+_WRITER_FLAG = PROJ / "logs" / ".writer_alerted"
+
+
 def ask_writer(prompt: str) -> dict:
-    """The draft writer: OpenAI first, the Claude CLI when OpenAI is off or fails."""
+    """Use only the approved OpenAI writer; alert once per failure episode."""
     try:
-        return ask_openai(prompt)
-    except Exception as e:
-        log.warning("OpenAI draft failed, using Claude: %s", e)
-        return ask_claude(prompt)
+        result = ask_openai(prompt)
+        if not isinstance(result, dict) or not result.get("beats"):
+            raise RuntimeError("OpenAI response missing draft beats")
+    except Exception as exc:
+        # Provider bodies/prompts can contain private text. Only fixed reasons
+        # or an exception class reach the existing Telegram alert chat.
+        detail = str(exc)
+        safe = (detail if re.fullmatch(r"OpenAI HTTP \d{3}", detail) else
+                "OpenAI daily budget reached" if detail.startswith("OpenAI daily cap") else
+                "OpenAI key missing" if detail == "no CONTENT_OPENAI_API_KEY" else
+                detail if detail in ("OpenAI connection timeout/unavailable", "OpenAI response missing draft beats") else
+                "OpenAI " + type(exc).__name__)
+        if not _WRITER_FLAG.exists() and tell(f"Draft stopped: {safe}. No draft written."):
+            _WRITER_FLAG.parent.mkdir(exist_ok=True)
+            _WRITER_FLAG.write_text(safe)
+        raise WriterUnavailable(safe) from None
+    _WRITER_FLAG.unlink(missing_ok=True)
+    return result
 
 
-def tell(text: str) -> None:
+def tell(text: str) -> bool:
     import digest
     try:
         digest.send(text)
-    except SystemExit as e:  # digest.send exits on a refusal; a message isn't worth dying for
-        log.warning("telegram: %s", e)
+        return True
+    except (Exception, SystemExit) as exc:
+        log.warning("telegram failed: %s", type(exc).__name__)
+        return False
 
 
 def esc(s: str) -> str:
@@ -368,7 +395,7 @@ def make_draft(bm: dict, dry: bool) -> str | None:
             "Idea": {"title": rt(name)},
             "Status": {"status": {"name": "Inbox"}},
             "Content type": {"select": {"name": "Video"}},
-            "Platform": {"select": {"name": "Instagram"}},
+            "Channel": {"multi_select": [{"name": "Instagram RU"}]},
             "Archive status": {"select": {"name": "Active"}},
             "Source": {"url": src},
             "Author": {"rich_text": rt(author)},
@@ -402,6 +429,9 @@ def cmd_drafts(backfill: bool, dry: bool) -> int:
         name = text_of(bm["properties"].get("Name") or {})
         try:
             url = make_draft(bm, dry)
+        except WriterUnavailable as exc:
+            log.error("draft stopped: %s", exc)
+            return 1
         except Exception as e:  # noqa: BLE001
             log.error("draft failed for %s: %s", name, e)
             continue  # not marked seen: the next run tries again
@@ -422,25 +452,18 @@ def cmd_drafts(backfill: bool, dry: bool) -> int:
 
 # --- stats ------------------------------------------------------------------------
 
-MATCH_PROMPT = """Match Magomed's posted Instagram reels to the Content rows they were made from.
-
-Each REEL group is one video (possibly posted as several variants). Each ROW is a planned \
-video with its script. A reel matches a row only when it is clearly the same video — same \
-topic and the caption reflects that script. Different language versions of the same script \
-(Russian vs English) DO match the same row. When unsure, answer null.
-
-Answer with ONE JSON object and nothing else: {{"<group id>": "<row id or null>", ...}}
-
-REELS:
-{reels}
-
-ROWS:
-{rows}
-"""
-
-
-def caption_key(it: dict) -> str:
-    return re.sub(r"\W+", " ", (it.get("caption") or "").lower()).strip()[:160] or it["shortCode"]
+def instagram_code(url: str) -> str | None:
+    """Exact public Instagram post path; no substring/Source/caption matching."""
+    try:
+        parsed = urllib.parse.urlsplit(url or "")
+        if (parsed.scheme not in ("http", "https") or parsed.username or parsed.password
+                or parsed.hostname not in ("instagram.com", "www.instagram.com", "m.instagram.com")
+                or parsed.port not in (None, 80, 443)):
+            return None
+    except ValueError:
+        return None
+    match = re.fullmatch(r"/(?:reels?|p)/([A-Za-z0-9_-]+)/?", parsed.path)
+    return match[1] if match else None
 
 
 def scrape(handles: list[str], days: int) -> list[dict]:
@@ -456,146 +479,132 @@ def scrape(handles: list[str], days: int) -> list[dict]:
     return reels
 
 
-def group_reels(reels: list[dict]) -> dict[str, list[dict]]:
-    groups: dict[str, list[dict]] = {}
-    for it in reels:
-        groups.setdefault(f"{it.get('ownerUsername')}:{caption_key(it)}", []).append(it)
-    return groups
-
-
-def totals(variants: list[dict]) -> dict:
-    best = max(variants, key=lambda v: v.get("videoPlayCount") or 0)
-    return {
-        "views": sum(v.get("videoPlayCount") or v.get("videoViewCount") or 0 for v in variants),
-        "likes": sum(max(v.get("likesCount") or 0, 0) for v in variants),
-        "comments": sum(v.get("commentsCount") or 0 for v in variants),
-        "variants": len(variants),
-        "best": f"https://www.instagram.com/reel/{best['shortCode']}/",
-        "first": min(v["timestamp"] for v in variants)[:10],
-    }
-
-
-def bookmark_for(src: str, bookmarks: dict[str, dict], by_source: dict[str, str]) -> str | None:
-    if not src:
+def metric(value) -> int | None:
+    # Missing, hidden, negative or malformed metrics are unknown, never zero.
+    if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    if "notion" in src and nid(src) in bookmarks:
-        return nid(src)
-    return by_source.get(acquire.normalize_url(src))
+    return int(value) if value >= 0 and value < float("inf") and value == int(value) else None
+
+
+def reel_views(reel: dict) -> int | None:
+    value = metric(reel.get("videoPlayCount"))
+    return value if value is not None else metric(reel.get("videoViewCount"))
+
+
+def posted_at(value: str | None) -> dt.datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        stamp = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # Existing legacy Posted on dates were UTC dates. Preserve their value;
+        # date-only rows use the beginning of that recorded UTC date.
+        if stamp.tzinfo is None:
+            if len(value) != 10:
+                return None
+            stamp = stamp.replace(tzinfo=dt.timezone.utc)
+        return stamp
+    except (TypeError, ValueError):
+        return None
+
+
+def snapshot_fields(properties: dict, stamp: dt.datetime | None, now: dt.datetime) -> list[str]:
+    if stamp is None:
+        return []
+    age = (now - stamp).total_seconds() / 3600
+    return [f"Views {hours}h" for hours in (24, 72)
+            if hours <= age <= hours + 12
+            and (properties.get(f"Views {hours}h") or {}).get("number") is None]
 
 
 def cmd_stats(force: bool, dry: bool, days: int) -> int:
     state = load_state()
-    last = state.get("stats_at")
     now = dt.datetime.now(dt.timezone.utc)
-    if last and not force and now - dt.datetime.fromisoformat(last) < STATS_EVERY - dt.timedelta(hours=6):
-        print(f"last pass {last} — under 3 days ago, skipping (use --force)")
+    rows = [r for r in query(CONTENT_DB)
+            if instagram_code((r["properties"].get("Posted") or {}).get("url"))]
+    # Keep the existing cadence, but don't skip an eligible once-only snapshot.
+    # The first pass under this policy also disregards old guessed assignments.
+    due = any(snapshot_fields(r["properties"], posted_at(
+        ((r["properties"].get("Posted on") or {}).get("date") or {}).get("start")), now) for r in rows)
+    last = posted_at(state.get("stats_at"))
+    if (last and not force and not due and state.get("stats_policy") == STATS_POLICY
+            and dt.timedelta(0) <= now - last < STATS_EVERY - dt.timedelta(hours=6)):
+        print(f"last pass {last.isoformat()} — under 3 days ago; no snapshot due, skipping")
         return 0
     handles = [h.strip() for h in os.environ.get("IG_HANDLES", "kurbaitaev,kurbaiitaev").split(",") if h.strip()]
     reels = scrape(handles, days)
-    groups = group_reels(reels)
-    log.info("%d reels in %d videos from %s", len(reels), len(groups), ", ".join(handles))
-
+    # Duplicate scraper records are one post, never additive views.
+    by_code = {}
+    for reel in reels:
+        code = reel.get("shortCode")
+        if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", code) or reel.get("error"):
+            continue
+        old = by_code.get(code)
+        if old is None or (reel_views(reel) if reel_views(reel) is not None else -1) > (reel_views(old) if reel_views(old) is not None else -1):
+            by_code[code] = reel
+    now = dt.datetime.now(dt.timezone.utc)  # observation clock after the scrape
     if not dry:
         ensure_columns(CONTENT_DB, CONTENT_COLUMNS)
-        ensure_columns(os.environ["NOTION_DATABASE_ID"], BOOKMARK_COLUMNS)
-    rows = {r["id"]: r for r in query(CONTENT_DB)}
-    assign: dict[str, str | None] = state.setdefault("assign", {})  # group key → row id / None
-
-    # 1) a reel link already on a row decides it
-    for gid, variants in groups.items():
-        codes = {v["shortCode"] for v in variants}
-        for rid, r in rows.items():
-            for col in ("Posted", "Source"):
-                u = (r["properties"].get(col) or {}).get("url") or ""
-                if any(c in u for c in codes):
-                    assign[gid] = rid
-
-    # 2) the model matches what is left. Only a match is remembered: a "no" is
-    #    asked again next pass, because the same question can go either way.
-    open_groups = [g for g in groups if assign.get(g) not in rows]
-    if open_groups:
-        cands = [r for r in rows.values() if status_of(r) in MATCHABLE]
-        reel_txt = "\n".join(
-            f"[{i}] @{groups[g][0].get('ownerUsername')} {groups[g][0]['timestamp'][:10]}: "
-            f"{(groups[g][0].get('caption') or '')[:400]!r}" for i, g in enumerate(open_groups))
-        row_txt = "\n".join(
-            f"[{r['id']}] {text_of(r['properties']['Idea'])} ({status_of(r)}): "
-            f"{page_text(r['id'], 500)!r}" for r in cands)
-        ans = ask_claude(MATCH_PROMPT.format(reels=reel_txt, rows=row_txt))
-        for i, g in enumerate(open_groups):
-            rid = ans.get(str(i))
-            if rid in rows:
-                assign[g] = rid
-            else:
-                assign.pop(g, None)
-
-    # 3) a brand-new reel with no row gets one, so its views are not lost
-    for g in open_groups:
-        if assign.get(g) is None and not dry:
-            first = min(groups[g], key=lambda v: v["timestamp"])
-            if now - dt.datetime.fromisoformat(first["timestamp"].replace("Z", "+00:00")) < NEW_ROW_WINDOW:
-                title = ((first.get("caption") or "").strip().splitlines() or [first["shortCode"]])[0][:90]
-                page = api("pages", "POST", {"parent": {"database_id": CONTENT_DB},
-                                             "properties": {"Idea": {"title": rt(title)},
-                                                            "Status": {"status": {"name": "Published"}},
-                                                            "Content type": {"select": {"name": "Video"}},
-                                                            "Platform": {"select": {"name": "Instagram"}},
-                                                            "Notes": {"rich_text": rt("Добавлено ботом: опубликованный ролик без строки в Content.")}}})
-                rows[page["id"]] = page
-                assign[g] = page["id"]
-
-    # The log shows every decision, so a wrong match can be seen and fixed.
-    for g, variants in sorted(groups.items(), key=lambda kv: kv[1][0]["timestamp"]):
-        rid = assign.get(g)
-        target = text_of(rows[rid]["properties"]["Idea"])[:50] if rid in rows else "—"
-        print(f"  {variants[0]['timestamp'][:10]} @{variants[0].get('ownerUsername'):<12} "
-              f"{totals(variants)['views']:>7,} ×{len(variants)}  "
-              f"{(variants[0].get('caption') or '').replace(chr(10), ' ')[:55]!r} → {target}")
-
-    # 4) write each row's totals across all its groups
-    per_row: dict[str, list[dict]] = {}
-    for g, variants in groups.items():
-        if assign.get(g):
-            per_row.setdefault(assign[g], []).extend(variants)
-    bookmarks = {nid(b["id"]): b for b in query(os.environ["NOTION_DATABASE_ID"],
-                                                 {"property": "Worth remaking", "checkbox": {"equals": True}})}
-    by_source = {acquire.normalize_url((b["properties"].get("Source") or {}).get("url") or ""): k
-                 for k, b in bookmarks.items()}
     prev = state.get("views", {})
-    report = []
-    today = now.date().isoformat()
-    for rid, variants in per_row.items():
-        t = totals(variants)
-        name = text_of(rows[rid]["properties"]["Idea"]).replace(" · сценарий для съёмки", "")
-        report.append((t["views"], t["views"] - prev.get(rid, 0), name, t))
-        if dry:
+    report, skipped, matched = [], 0, set()
+    for row in rows:
+        rid = row["id"]
+        # Fresh page read protects user edits to Posted and existing snapshots.
+        fresh = row if dry else api(f"pages/{rid}")
+        p = fresh["properties"]
+        code = instagram_code((p.get("Posted") or {}).get("url"))
+        reel = by_code.get(code)
+        if reel is None:
             continue
-        props = {"Posted": {"url": t["best"]}, "Posted on": {"date": {"start": t["first"]}},
-                 "Views": {"number": t["views"]}, "Likes": {"number": t["likes"]},
-                 "Comments": {"number": t["comments"]}, "Variants": {"number": t["variants"]},
-                 "Stats updated": {"date": {"start": today}}}
-        if status_of(rows[rid]) != "Published":
-            props["Status"] = {"status": {"name": "Published"}}
-        api(f"pages/{rid}", "PATCH", {"properties": props})
-        bm = bookmark_for((rows[rid]["properties"].get("Source") or {}).get("url") or "", bookmarks, by_source)
-        if bm:
-            api(f"pages/{bm}", "PATCH", {"properties": {"Remake views": {"number": t["views"]}}})
-        prev[rid] = t["views"]
-
-    report.sort(key=lambda x: -x[0])
-    lines = [f"{v:>7,}  (+{d:,})  {n}" for v, d, n, _ in report]
-    print("\n".join(lines) or "no posted reels matched a Content row")
-    unmatched = [g for g in groups if not assign.get(g)]
-    if unmatched:
-        print(f"{len(unmatched)} video(s) without a Content row (older than {NEW_ROW_WINDOW.days} days)")
+        matched.add(code)
+        views = reel_views(reel)
+        current = metric((p.get("Views") or {}).get("number"))
+        if views is None or (current is not None and views < current):
+            skipped += 1
+            continue  # partial/regressed input cannot refresh metrics or snapshots
+        # Notion stores date-times at minute precision (verified on the live
+        # database). Write that precision so exact readback stays meaningful.
+        observed = now.replace(second=0, microsecond=0).isoformat(timespec="minutes")
+        props = {"Views": {"number": views}, "Stats updated": {"date": {"start": observed}}}
+        for column, key in (("Likes", "likesCount"), ("Comments", "commentsCount")):
+            value = metric(reel.get(key))
+            if value is not None:
+                props[column] = {"number": value}
+        date = (p.get("Posted on") or {}).get("date")
+        stamp = posted_at(date.get("start")) if date else posted_at(reel.get("timestamp"))
+        if not date and stamp and stamp <= now:
+            stamp = stamp.replace(second=0, microsecond=0)
+            props["Posted on"] = {"date": {"start": stamp.isoformat(timespec="minutes")}}
+        for field in snapshot_fields(p, stamp, now):
+            props[field] = {"number": views}
+        name = text_of(p.get("Idea") or {}).replace(" · сценарий для съёмки", "")
+        if not dry:
+            api(f"pages/{rid}", "PATCH", {"properties": props})
+            saved = api(f"pages/{rid}")["properties"]
+            for field, value in props.items():
+                if field == "Stats updated" or field == "Posted on":
+                    if posted_at((saved.get(field, {}).get("date") or {}).get("start")) != posted_at(value["date"]["start"]):
+                        raise RuntimeError(f"Stats date readback failed: {field}")
+                elif saved.get(field, {}).get("number") != value["number"]:
+                    raise RuntimeError(f"Stats metric readback failed: {field}")
+        report.append((views, views - (current if current is not None else 0), name))
+        prev[rid] = views
+    unmatched = len(set(by_code) - matched)
+    summary = f"{len(report)} rows {'would update' if dry else 'updated'}; {unmatched} unmatched; 0 rows created; {skipped} invalid/regressed rows skipped"
+    print(summary, flush=True)
+    if os.environ.get("INVOCATION_ID"):
+        # The existing unit appends stdout to a file. Also keep its bounded
+        # outcome in the unit journal without changing that log configuration.
+        import syslog
+        syslog.openlog("saved-to-notes-content-stats")
+        syslog.syslog(syslog.LOG_INFO, summary)
     if dry:
         return 0
-    state["views"] = prev
-    state["stats_at"] = now.isoformat()
+    state.update(views=prev, stats_at=now.isoformat(), stats_policy=STATS_POLICY)
     save_state(state)
     if report:
-        top = "\n".join(f"• <b>{v:,}</b> (+{d:,}) — {esc(n)}" for v, d, n, _ in report[:10])
-        tell(f"📊 Просмотры за 3 дня — {len(report)} ролик(ов)\n{top}")
+        top = "\n".join(f"• <b>{v:,}</b> (+{change:,}) — {esc(name)}"
+                        for v, change, name in sorted(report, reverse=True)[:10])
+        tell(f"📊 Просмотры — {len(report)} ролик(ов)\n{top}")
     return 0
 
 
@@ -745,6 +754,9 @@ def cmd_pick(dry: bool, show: bool, force: bool, as_json: bool) -> int:
             beats, changes, kept, tightened = new, [str(c) for c in (t.get("changes") or [])][:5], share, new != old
         else:
             log.warning("close edit thrown away: it kept %.0f%% of the draft", share * 100)
+    except WriterUnavailable as exc:
+        log.error("pick stopped: %s", exc)
+        return 1
     except Exception as e:
         log.warning("close edit failed, the draft stays as it is: %s", e)
     today = dt.date.today().isoformat()
@@ -781,11 +793,18 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=60)
     a = ap.parse_args()
     load_env()
-    if a.cmd == "drafts":
-        return cmd_drafts(a.backfill, a.dry_run)
-    if a.cmd == "pick":
-        return cmd_pick(a.dry_run, a.show, a.force, a.json)
-    return cmd_stats(a.force, a.dry_run, a.days)
+    (PROJ / "state").mkdir(exist_ok=True)
+    with (PROJ / "state" / "content.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log.warning("another content operation is active")
+            return 75
+        if a.cmd == "drafts":
+            return cmd_drafts(a.backfill, a.dry_run)
+        if a.cmd == "pick":
+            return cmd_pick(a.dry_run, a.show, a.force, a.json)
+        return cmd_stats(a.force, a.dry_run, a.days)
 
 
 if __name__ == "__main__":

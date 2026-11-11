@@ -8,6 +8,9 @@ actually checking. A network gap (Mac offline) is NOT treated as a failure — t
 bot self-heals when connectivity returns, so the watchdog leaves it alone.
 """
 
+import argparse
+import datetime as dt
+import fcntl
 import json
 import os
 import pathlib
@@ -18,6 +21,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from zoneinfo import ZoneInfo
 
 import claude_login  # noqa: E402
 
@@ -29,6 +33,48 @@ WLOG = PROJ / "logs" / "watchdog.log"
 STALE_SECONDS = 600  # >10 min without a heartbeat = stuck
 SERVICE = "saved-to-notes.service"
 IS_MAC = sys.platform == "darwin"
+MINI_HEARTBEAT = PROJ / "state" / "mini-heartbeat"
+MINI_STALE_SECONDS = 3600
+
+
+def check_mini_heartbeat(token: str, chat: str, dry_run: bool = False) -> None:
+    """One silent/back transition per acknowledged alert, on the existing timer.
+
+    Dry-run receipts are separate: a test cannot suppress a real later alert.
+    Missing heartbeat means the Mini side has not been enabled yet.
+    """
+    if not MINI_HEARTBEAT.exists():
+        return
+    folder = MINI_HEARTBEAT.parent
+    flag = folder / (".mini-silent-dry-run" if dry_run else ".mini-silent")
+    with (folder / "mini-heartbeat.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        try:
+            stamp = MINI_HEARTBEAT.stat().st_mtime
+        except FileNotFoundError:
+            return
+        age = time.time() - stamp
+        if age < 0:
+            return  # a future clock is not proof of recovery
+        stale = age > MINI_STALE_SECONDS
+        if stale == flag.exists():
+            return
+        local = dt.datetime.fromtimestamp(stamp, ZoneInfo("America/Los_Angeles"))
+        message = (f"Mac mini silent since {local:%Y-%m-%d %H:%M} PT" if stale
+                   else "Mac mini is back.")
+        if dry_run:
+            print(message)
+            sent = True
+        else:
+            sent = alert(token, chat, message)
+        if sent:
+            if stale:
+                flag.write_text(str(stamp))
+            else:
+                flag.unlink(missing_ok=True)
 
 SAVES_FAILING_AFTER = 3  # this many failed shares in a row means something is wrong
 SAVES_FAILING_WINDOW_S = 48 * 3600
@@ -198,17 +244,19 @@ def check_claude_auth(token: str, chat: str) -> None:
     """Alert once when the Claude OAuth token expires; reset when re-logged-in."""
     if claude_token_expired():
         if not _AUTH_FLAG.exists():
-            alert(token, chat,
+            sent = alert(token, chat,
                   "🔑 Claude login expired — the bot can't analyze reels until you run "
                   "`claude` → `/login` in a terminal. Reels you send are kept and will "
                   "be recovered after login.")
-            _AUTH_FLAG.write_text(str(int(time.time())))
-            wlog("claude OAuth EXPIRED -> alerted user")
+            if sent:
+                _AUTH_FLAG.write_text(str(int(time.time())))
+            wlog(f"claude OAuth EXPIRED -> alerted={sent}")
     elif _AUTH_FLAG.exists():
-        _AUTH_FLAG.unlink(missing_ok=True)
-        _AUTH_FAILED.unlink(missing_ok=True)
-        alert(token, chat, "✅ Claude login restored — the bot is analyzing reels again.")
-        wlog("claude OAuth restored")
+        sent = alert(token, chat, "✅ Claude login restored — the bot is analyzing reels again.")
+        if sent:
+            _AUTH_FLAG.unlink(missing_ok=True)
+            _AUTH_FAILED.unlink(missing_ok=True)
+        wlog(f"claude OAuth restored -> alerted={sent}")
 
 
 def recent_share_statuses(n: int = SAVES_FAILING_AFTER) -> list[tuple[str, float]]:
@@ -262,9 +310,10 @@ def check_saves(token: str, chat: str) -> None:
                 _SAVES_FLAG.write_text(str(int(time.time())))
             wlog(f"saves failing -> alerted={sent}")
     elif _SAVES_FLAG.exists():
-        _SAVES_FLAG.unlink(missing_ok=True)
-        alert(token, chat, "✅ Saves are working again.")
-        wlog("saves working again")
+        sent = alert(token, chat, "✅ Saves are working again.")
+        if sent:
+            _SAVES_FLAG.unlink(missing_ok=True)
+        wlog(f"saves working again -> alerted={sent}")
 
 
 def ensure_workspace_trust() -> bool:
@@ -285,9 +334,18 @@ def ensure_workspace_trust() -> bool:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mini-heartbeat-only", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    if args.dry_run and not args.mini_heartbeat_only:
+        parser.error("--dry-run requires --mini-heartbeat-only (no bot operations)")
     load_env()
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat = os.environ.get("ALLOWED_USER_IDS", "").split(",")[0].strip()
+    check_mini_heartbeat(token, chat, dry_run=args.dry_run)
+    if args.mini_heartbeat_only:
+        return
     if os.environ.get("RUN_BOT", "1").strip() == "0":
         # A reader machine. Restarting "the missing bot" here is precisely how
         # a second poller gets started.

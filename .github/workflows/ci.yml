@@ -30,13 +30,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install 'ruff==0.9.10'   # pinned: unpinned linters make CI unreproducible
+          pip install 'pytest==8.4.2'
 
       # Two regression tests cut real video on purpose, and ffmpeg isn't on pip.
       - name: Install ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
 
       - name: Compile every module
-        run: python -m compileall -q bot.py acquire.py notion.py ledger.py watchdog.py doctor.py
+        run: python -m compileall -q bot.py acquire.py notion.py ledger.py watchdog.py doctor.py content.py
 
       - name: Lint
         run: ruff check --no-cache .
@@ -46,6 +47,9 @@ jobs:
 
       - name: Card tests
         run: python tests/test_cards.py
+
+      - name: Complete tests including content stats and watchdog
+        run: python -m pytest -q
 
   shellcheck:
     runs-on: ubuntu-latest
