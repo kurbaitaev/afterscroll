@@ -149,6 +149,7 @@ def test_snapshot_due_bypasses_old_cadence_and_link_rechecked(captured, monkeypa
 
 
 def test_writer_failure_alerts_once_never_falls_back_or_writes_draft(monkeypatch, tmp_path):
+    monkeypatch.setattr(content, "content_pack", lambda *a, **kw: "validated pack")
     flag = tmp_path / "writer.flag"
     monkeypatch.setattr(content, "_WRITER_FLAG", flag)
     monkeypatch.setattr(content, "ask_openai", Mock(side_effect=RuntimeError("private response")))
@@ -195,6 +196,7 @@ def test_writer_transient_retry_and_permanent_error_bound(monkeypatch, tmp_path)
 
 
 def test_draft_uses_existing_channel_schema(monkeypatch, tmp_path):
+    monkeypatch.setattr(content, "content_pack", lambda *a, **kw: "validated pack")
     monkeypatch.setattr(content, "vault_note", lambda src: tmp_path / "source")
     monkeypatch.setattr(content, "note_source", lambda p: ("title", "author", "source"))
     monkeypatch.setattr(content, "ask_writer", lambda p: {"title": "title", "beats": [["line"]]})

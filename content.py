@@ -7,6 +7,8 @@
     python3 content.py stats --force       # run even if the last pass was under 3 days ago
     python3 content.py pick                # this week's reel to film: one waiting draft, tightened
     python3 content.py pick --show         # the latest pick again, nothing new done
+    python3 content.py drafts --show-prompt --source-note vault/example.md
+    python3 content.py pick --show-prompt  # read-only prompt preview, no model or writes
 
 drafts (timer, every 15 min): a bookmark ticked "Worth remaking" that has no row
 in 💡 Content Ideas gets one — status Inbox, a Russian script close to the
@@ -26,6 +28,7 @@ a draft is never picked twice. Nothing is written when a model call fails.
 import argparse
 import datetime as dt
 import fcntl
+import functools
 import json
 import logging
 import os
@@ -238,6 +241,59 @@ class WriterUnavailable(RuntimeError):
 
 
 _WRITER_FLAG = PROJ / "logs" / ".writer_alerted"
+PACK_DIR = pathlib.Path("/home/magomed/content-pack")
+PACK_MAX_AGE = 72 * 60 * 60
+PACK_ALERT = "Draft stopped: content pack missing or stale."
+_PACK_FLAG = PROJ / "logs" / ".content_pack_alerted"
+
+
+class PackUnavailable(WriterUnavailable):
+    """A draft/pick cannot proceed without the current shared content pack."""
+
+
+@functools.lru_cache(maxsize=1)
+def _pack_blocks() -> dict[str, str]:
+    """Check once and cache both jobs for this process, before any model/write."""
+    try:
+        stamp = (PACK_DIR / "PACK.txt").stat().st_mtime
+        age = time.time() - stamp
+        if age > PACK_MAX_AGE or age < -300:
+            raise ValueError("pack age")
+        command = [sys.executable, str(PACK_DIR / "pack.py")]
+        subprocess.run(command + ["check"], check=True, capture_output=True, text=True, timeout=15)
+        blocks = {}
+        for job in ("script", "ideas"):
+            text = subprocess.run(command + ["show", job], check=True, capture_output=True,
+                                  text=True, timeout=15).stdout
+            if not all(s in text for s in (f"===== CONTENT PACK: {job} =====",
+                                           "===== VOICE =====", "===== RULES =====", "===== LESSONS")):
+                raise ValueError("incomplete pack")
+            blocks[job] = text
+        if (PACK_DIR / "PACK.txt").stat().st_mtime != stamp:
+            raise ValueError("pack changed while loading")
+        return blocks
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # Never forward command output: it can contain private source material.
+        raise PackUnavailable(PACK_ALERT) from None
+
+
+def content_pack(job: str, *, alert: bool = True) -> str:
+    try:
+        block = _pack_blocks()[job]
+    except PackUnavailable:
+        if alert and not _PACK_FLAG.exists() and tell(PACK_ALERT):
+            _PACK_FLAG.parent.mkdir(exist_ok=True)
+            _PACK_FLAG.write_text(PACK_ALERT)
+        raise
+    if alert:
+        _PACK_FLAG.unlink(missing_ok=True)
+    return block
+
+
+def draft_prompt(note: pathlib.Path, author: str = "", *, alert: bool = True) -> str:
+    pack = content_pack("script", alert=alert)
+    title, source_author, verbatim = note_source(note)
+    return pack + "\n" + DRAFT_PROMPT.format(author=source_author or author or "?", title=title, source=verbatim)
 
 
 def ask_writer(prompt: str) -> dict:
@@ -288,16 +344,9 @@ def nid(s: str) -> str:
 DRAFT_PROMPT = """You are adapting someone else's Instagram reel into a Russian script that \
 Magomed will film himself (talking head). His audience speaks Russian.
 
-Rules:
-- Stay CLOSE to the original: same order, same examples, same argument, same ending. \
-Do not add ideas, statistics or advice that are not in the original. Do not summarise — \
-cover the whole transcript.
-- Natural spoken Russian, the way a person talks to camera: short sentences, "ты", no \
-bureaucratic or translated-sounding phrasing. Read it back as a native speaker would and \
-rewrite anything that sounds like machine translation. He is from Dagestan: never a Moscow \
-hipster or corporate voice.
-- No emojis, no hashtags, no stage directions, no long dashes.
-- Break it into beats: each beat is 1–4 short lines that are read in one breath.
+Task: cover the whole transcript, preserving its order, examples, argument and ending.
+Return spoken text only, without stage directions. Break it into beats: each beat is
+1–4 short lines read in one breath. Follow the shared content pack above for voice and rules.
 
 Answer with ONE JSON object and nothing else:
 {{"title": "<2–5 word Russian title>", "hook": "<the opening line, as in the script>", \
@@ -366,7 +415,7 @@ def make_draft(bm: dict, dry: bool) -> str | None:
         return None
     title, author, verbatim = note_source(note)
     author = author or text_of(p.get("Author") or {})
-    d = ask_writer(DRAFT_PROMPT.format(author=author or "?", title=title, source=verbatim))
+    d = ask_writer(draft_prompt(note, author))
     beats = d.get("beats") or []
     if not beats:
         raise RuntimeError("draft came back without beats")
@@ -408,6 +457,11 @@ def make_draft(bm: dict, dry: bool) -> str | None:
 
 
 def cmd_drafts(backfill: bool, dry: bool) -> int:
+    try:
+        content_pack("script")
+    except PackUnavailable as exc:
+        log.error("%s", exc)
+        return 1
     state = load_state()
     ticked = query(os.environ["NOTION_DATABASE_ID"],
                    {"property": "Worth remaking", "checkbox": {"equals": True}})
@@ -638,16 +692,9 @@ WAITING DRAFTS (id | title | hook | how it opens):
 TIGHTEN_PROMPT = """You are doing a CLOSE EDIT of a Russian script Magomed will read to camera. \
 It is already an adaptation of another creator's reel; your job is only to make it better to say aloud.
 
-Rules:
-- Keep the order, facts, examples, argument and ending. Keep at least 85% of the wording.
-- Change a line only for a clear gain when spoken: the second line must move the story on \
-(the event, cause, scene or question behind the opening line) and never restate it; every line \
-adds something new, so cut or merge lines where nothing changes.
-- Natural spoken Russian, "ты", short sentences. He is from Dagestan: no Moscow or corporate \
-voice, no phrasing that sounds translated.
-- Add no ideas, statistics, lessons or metaphors that are not in the draft.
-- No emojis, hashtags, stage directions or long dashes.
-- Keep the beats: each beat is 1-4 short lines read in one breath.
+Task: keep the order, examples, argument and ending. Change a line only for a clear
+gain when spoken; cut or merge repeated lines. Keep the beats: each beat is 1-4 short
+spoken lines without stage directions. Follow the shared content pack above for voice and rules.
 
 Answer with ONE JSON object and nothing else:
 {{"beats": [["line", "line"], ["line"]], "changes": ["<what changed and why, max 12 words, in English>"]}}
@@ -680,7 +727,7 @@ def kept_share(old: list[list[str]], new: list[list[str]]) -> float:
     return sum(min(n, b[w]) for w, n in a.items()) / max(1, sum(a.values()))
 
 
-def cmd_pick(dry: bool, show: bool, force: bool, as_json: bool) -> int:
+def cmd_pick(dry: bool, show: bool, force: bool, as_json: bool, show_prompt: bool = False) -> int:
     state = load_state()
     picks = state.get("reel_picks", [])
 
@@ -697,10 +744,16 @@ def cmd_pick(dry: bool, show: bool, force: bool, as_json: bool) -> int:
     last = picks[-1] if picks else None
     if show:
         return out(last)
-    if last and not force and not dry and dt.date.today() - dt.date.fromisoformat(last["date"]) < PICK_EVERY:
+    if last and not force and not dry and not show_prompt and dt.date.today() - dt.date.fromisoformat(last["date"]) < PICK_EVERY:
         log.info("this week's pick is already made (%s)", last["date"])
         return out(last)
 
+    try:
+        pack = content_pack("ideas", alert=not show_prompt)
+        script_pack = content_pack("script", alert=not show_prompt)
+    except PackUnavailable as exc:
+        log.error("%s", exc)
+        return 1
     rows = query(CONTENT_DB)
     def prop(r, k):
         return text_of(r["properties"].get(k) or {})
@@ -738,15 +791,19 @@ def cmd_pick(dry: bool, show: bool, force: bool, as_json: bool) -> int:
     drafts = "\n".join(
         f"{i} | {prop(r, 'Idea')[:70]} | {prop(r, 'Hook / key idea')[:140]} | "
         + " / ".join(" ".join(b) for b in scripts[i][:3])[:400] for i, r in waiting.items())
-    ans = ask_claude(PICK_PROMPT.format(usual=f"{USUAL_VIEWS:,}", winners="\n".join(winners),
-                                        losers="\n".join(losers) or "(none)", drafts=drafts))
+    prompt = pack + "\n" + PICK_PROMPT.format(usual=f"{USUAL_VIEWS:,}", winners="\n".join(winners),
+                                             losers="\n".join(losers) or "(none)", drafts=drafts)
+    if show_prompt:
+        print(prompt)
+        return 0
+    ans = ask_claude(prompt)
     pid = ans.get("pick")
     if pid not in waiting:
         raise RuntimeError(f"the pick {pid!r} is not one of the waiting drafts")
     row, old = waiting[pid], scripts[pid]
     beats, changes, kept, tightened = old, [], 1.0, False
     try:
-        t = ask_writer(TIGHTEN_PROMPT.format(draft="\n\n".join("\n".join(b) for b in old)))
+        t = ask_writer(script_pack + "\n" + TIGHTEN_PROMPT.format(draft="\n\n".join("\n".join(b) for b in old)))
         new = [[str(x).strip() for x in b if str(x).strip()] for b in t.get("beats") or []]
         new = [b for b in new if b]
         share = kept_share(old, new) if new else 0
@@ -786,13 +843,31 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["drafts", "stats", "pick"])
     ap.add_argument("--show", action="store_true")
+    ap.add_argument("--show-prompt", action="store_true", help="print full prompt; no models, writes or alerts")
+    ap.add_argument("--source-note", type=pathlib.Path, help="local vault note for drafts --show-prompt")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--backfill", action="store_true")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--days", type=int, default=60)
     a = ap.parse_args()
+    if a.show_prompt and (a.cmd == "stats" or a.show):
+        ap.error("--show-prompt is for drafts or pick, without --show")
+    if a.source_note and not (a.cmd == "drafts" and a.show_prompt):
+        ap.error("--source-note requires drafts --show-prompt")
+    if a.show_prompt and a.cmd == "drafts" and not a.source_note:
+        ap.error("drafts --show-prompt requires --source-note <local vault note>")
+    _pack_blocks.cache_clear()  # one cache per CLI run, including embedded invocations
     load_env()
+    if a.show_prompt:
+        if a.cmd == "pick":
+            return cmd_pick(False, False, False, False, show_prompt=True)
+        try:
+            print(draft_prompt(a.source_note, alert=False))
+        except (PackUnavailable, OSError) as exc:
+            log.error("prompt preview unavailable: %s", type(exc).__name__)
+            return 1
+        return 0
     (PROJ / "state").mkdir(exist_ok=True)
     with (PROJ / "state" / "content.lock").open("a") as lock:
         try:

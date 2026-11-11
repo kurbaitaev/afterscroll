@@ -1,5 +1,6 @@
 # Secrets — never commit
-.env
+.env*
+!.env.example
 
 # Personal data: your processed reels, your notes, your logs.
 # These are yours; they don't belong in the repo.
