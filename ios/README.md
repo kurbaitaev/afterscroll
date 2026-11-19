@@ -1,4 +1,4 @@
-# Saved to Notes — iPhone app
+# Afterscroll — iPhone app
 
 A reader and a review loop over the notes the bot already files. It does **not**
 capture links: Telegram does that, and does it reliably. This app exists for the

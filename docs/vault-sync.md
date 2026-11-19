@@ -12,10 +12,10 @@ Every version of every note is kept. A reprocess or a bad edit is one
 
 ## Server (once)
 
-    gh repo create saved-to-notes-vault --private
+    gh repo create afterscroll-vault --private
     ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519_vault      # on the server
-    gh repo deploy-key add ~/.ssh/id_ed25519_vault.pub --allow-write -R <you>/saved-to-notes-vault
-    cd ~/saved-to-notes/vault && git init -b main && git remote add origin git@github.com:<you>/saved-to-notes-vault.git
+    gh repo deploy-key add ~/.ssh/id_ed25519_vault.pub --allow-write -R <you>/afterscroll-vault
+    cd ~/saved-to-notes/vault && git init -b main && git remote add origin git@github.com:<you>/afterscroll-vault.git
     git add -A && git commit -m "Initial vault" && git push -u origin main
     echo VAULT_SYNC=1 >> ~/saved-to-notes/.env && ./deploy/install-linux.sh
 
@@ -24,7 +24,7 @@ your personal key.
 
 ## Mac (once)
 
-    git clone https://github.com/<you>/saved-to-notes-vault.git "<your Obsidian vault>/Saved to Notes"
+    git clone https://github.com/<you>/afterscroll-vault.git "<your Obsidian vault>/Saved to Notes"
     cd <this checkout> && mv vault vault.backup && ln -s "<your Obsidian vault>/Saved to Notes" vault
     ./install-mac-reader.sh
 

@@ -1,4 +1,4 @@
-# saved-to-notes
+# Afterscroll
 
 Your saved posts are a graveyard. Turn them into something you'll actually read.
 
@@ -44,7 +44,7 @@ Acquisition is kept out of the agent on purpose: it's the fragile, infrastructur
 **Requires macOS** (launchd for the service, Apple's ffmpeg build, Claude Code CLI) and **Python 3.10+**.
 
 ```bash
-git clone https://github.com/kurbaitaev/saved-to-notes.git
+git clone https://github.com/kurbaitaev/afterscroll.git
 cd saved-to-notes
 pip install -r requirements.txt
 brew install yt-dlp ffmpeg

@@ -256,7 +256,7 @@ backlog incapable of accumulating.
 
 ---
 
-## 8. What this means for saved-to-notes
+## 8. What this means for Afterscroll
 
 1. **Don't build search.** Re-finding is solved; returning is not.
 2. **Don't build a resurfacing feed.** Re-showing the note is rereading — the
