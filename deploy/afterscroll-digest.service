@@ -1,5 +1,5 @@
 [Unit]
-Description=saved-to-notes weekly digest
+Description=Afterscroll weekly digest
 
 [Service]
 Type=oneshot

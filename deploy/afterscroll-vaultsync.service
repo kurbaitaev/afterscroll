@@ -1,5 +1,5 @@
 [Unit]
-Description=saved-to-notes vault push (safety net for the after-save push)
+Description=Afterscroll vault push (safety net for the after-save push)
 
 [Service]
 Type=oneshot

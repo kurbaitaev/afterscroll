@@ -1,5 +1,5 @@
 [Unit]
-Description=saved-to-notes: pull views of posted reels into Content Ideas
+Description=Afterscroll: pull views of posted reels into Content Ideas
 
 [Service]
 Type=oneshot

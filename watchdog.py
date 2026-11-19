@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hourly health check for the saved-to-notes bot (run by launchd).
+"""Hourly health check for the Afterscroll bot (run by launchd).
 
 Checks the bot is alive AND actively polling (via logs/heartbeat, touched every
 60s by the bot). If it's down or stuck, restarts it and pings the user on
@@ -26,12 +26,13 @@ from zoneinfo import ZoneInfo
 import claude_login  # noqa: E402
 
 PROJ = pathlib.Path(__file__).resolve().parent
-LABEL = "com.kurbaitaev.saved-to-notes"
+LABEL = "com.kurbaitaev.afterscroll"
 LOG = PROJ / "logs" / "bot.err.log"
 HEARTBEAT = PROJ / "logs" / "heartbeat"  # bot touches this every 60s while polling
 WLOG = PROJ / "logs" / "watchdog.log"
 STALE_SECONDS = 600  # >10 min without a heartbeat = stuck
-SERVICE = "saved-to-notes.service"
+SERVICE = "afterscroll.service"
+BOT = f"{PROJ.name}/bot.py"  # the bot as pgrep sees it: <this folder>/bot.py
 IS_MAC = sys.platform == "darwin"
 MINI_HEARTBEAT = PROJ / "state" / "mini-heartbeat"
 MINI_STALE_SECONDS = 3600
@@ -96,7 +97,7 @@ def load_env() -> None:
 
 
 def bot_running() -> bool:
-    r = subprocess.run(["pgrep", "-f", "saved-to-notes/bot.py"], capture_output=True, text=True)
+    r = subprocess.run(["pgrep", "-f", BOT], capture_output=True, text=True)
     return bool(r.stdout.strip())
 
 
@@ -112,7 +113,7 @@ def ghost_bot_paths() -> list[str]:
     # check never found a script there; -a is its full command line. On macOS
     # -l is the full line and -a means something else.
     flag = "-fl" if IS_MAC else "-fa"
-    r = subprocess.run(["pgrep", flag, "saved-to-notes/bot.py"],
+    r = subprocess.run(["pgrep", flag, BOT],
                        capture_output=True, text=True)
     ghosts = []
     for line in r.stdout.splitlines():
@@ -376,7 +377,7 @@ def main() -> None:
         return
     ghosts = ghost_bot_paths()
     if ghosts:
-        subprocess.run(["pkill", "-f", "saved-to-notes/bot.py"], check=False)
+        subprocess.run(["pkill", "-f", BOT], check=False)
         wlog(f"killed ghost bot running from deleted path: {ghosts}")
         restart()
         alert(token, chat, "🔧 Found the bot running from a deleted folder (it was "

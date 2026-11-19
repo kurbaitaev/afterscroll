@@ -1,10 +1,10 @@
 #!/bin/bash
-# Manage the saved-to-notes launchd service.
+# Manage the Afterscroll launchd service.
 # Usage: ./ctl.sh {install|start|stop|restart|status|logs|tail}
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # Defaults to com.<your-username>.saved-to-notes; override with SERVICE_LABEL.
-LABEL="${SERVICE_LABEL:-com.$(id -un).saved-to-notes}"
+LABEL="${SERVICE_LABEL:-com.$(id -un).afterscroll}"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 LOGDIR="$HERE/logs"

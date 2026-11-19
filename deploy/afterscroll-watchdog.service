@@ -1,5 +1,5 @@
 [Unit]
-Description=saved-to-notes watchdog (auth expiry, workspace trust, ghost processes)
+Description=Afterscroll watchdog (auth expiry, workspace trust, ghost processes)
 
 [Service]
 Type=oneshot

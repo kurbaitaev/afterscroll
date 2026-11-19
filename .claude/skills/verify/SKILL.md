@@ -15,10 +15,10 @@ Same checks as CI: compile, ruff (pinned 0.9.10), `tests/test_pipeline.py`, `tes
 
 ## 2. Live check, after the change is on Netcup
 
-The bot runs on Netcup as user services (`saved-to-notes.service` plus timers). Push and restart only when the task is to deploy it. Then read, without changing anything:
+The bot runs on Netcup as user services (`afterscroll.service` plus timers). Push and restart only when the task is to deploy it. Then read, without changing anything:
 
 ```
-ssh netcup-work 'cd ~/saved-to-notes && git log --oneline -1 && systemctl --user is-active saved-to-notes && journalctl --user -u saved-to-notes --since "-10 min" -p warning --no-pager | tail -20'
+ssh netcup-work 'cd ~/afterscroll && git log --oneline -1 && systemctl --user is-active afterscroll && journalctl --user -u afterscroll --since "-10 min" -p warning --no-pager | tail -20'
 ```
 
 Done when Netcup is on the commit you pushed, the service is `active`, and there are no new errors. If the change is to card handling, the real proof is one card going through end to end. Ask Magomed to save one post only if you can't produce one yourself.

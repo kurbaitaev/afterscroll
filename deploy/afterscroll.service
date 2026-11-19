@@ -1,5 +1,5 @@
 [Unit]
-Description=saved-to-notes Telegram bot
+Description=Afterscroll Telegram bot
 After=network-online.target
 Wants=network-online.target
 

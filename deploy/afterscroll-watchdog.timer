@@ -1,5 +1,5 @@
 [Unit]
-Description=Run the saved-to-notes watchdog every 90 minutes
+Description=Run the Afterscroll watchdog every 90 minutes
 
 [Timer]
 OnBootSec=5min

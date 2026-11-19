@@ -1078,7 +1078,7 @@ def test_a_setup_token_counts_as_a_login(monkeypatch):
 # five times but only ever said "restart FAILED", never why.
 
 def test_the_bot_unit_starts_without_its_tmp_folder():
-    unit = (pathlib.Path(__file__).resolve().parent.parent / "deploy" / "saved-to-notes.service").read_text()
+    unit = (pathlib.Path(__file__).resolve().parent.parent / "deploy" / "afterscroll.service").read_text()
     paths = [p for line in unit.splitlines() if line.startswith("ReadWritePaths=")
              for p in line.partition("=")[2].split()]
     assert paths, "the unit lost its ReadWritePaths line"

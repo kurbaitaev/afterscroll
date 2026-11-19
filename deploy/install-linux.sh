@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install saved-to-notes on a Linux VPS as systemd --user units:
+# Install Afterscroll on a Linux VPS as systemd --user units:
 #   the bot (always on), the watchdog (every 90 min), the digest (Sunday 18:00),
 #   remake drafts (every 15 min) and reel views (every 3 days).
 # Run as the normal user that owns the checkout, from anywhere:
@@ -25,29 +25,35 @@ if ! grep -qE '^(ANTHROPIC_API_KEY|OPENAI_API_KEY)=.+' "$HERE/.env" \
 fi
 command -v systemctl >/dev/null || { echo "error: systemd not found." >&2; exit 1; }
 
+# One-time move from the old unit names (saved-to-notes*, before 2026-11-19).
+for old in $(ls "$UNIT_DIR" 2>/dev/null | grep -E '^saved-to-notes.*\.(service|timer)$'); do
+  systemctl --user disable --now "$old" 2>/dev/null || true
+  mkdir -p "$UNIT_DIR/old-units" && mv "$UNIT_DIR/$old" "$UNIT_DIR/old-units/$old"
+done
+systemctl --user daemon-reload
 mkdir -p "$HERE/logs" "$UNIT_DIR" /tmp/saved-to-notes
 
 render() { sed -e "s|__DIR__|$HERE|g" -e "s|__PYTHON__|$PYTHON|g" "$1"; }
 
-for unit in saved-to-notes.service \
-            saved-to-notes-watchdog.service saved-to-notes-watchdog.timer \
-            saved-to-notes-digest.service   saved-to-notes-digest.timer \
-            saved-to-notes-vaultsync.service saved-to-notes-vaultsync.timer \
-            saved-to-notes-content-drafts.service saved-to-notes-content-drafts.timer \
-            saved-to-notes-content-stats.service saved-to-notes-content-stats.timer \
-            saved-to-notes-xfeed.service saved-to-notes-xfeed.timer \
+for unit in afterscroll.service \
+            afterscroll-watchdog.service afterscroll-watchdog.timer \
+            afterscroll-digest.service   afterscroll-digest.timer \
+            afterscroll-vaultsync.service afterscroll-vaultsync.timer \
+            afterscroll-content-drafts.service afterscroll-content-drafts.timer \
+            afterscroll-content-stats.service afterscroll-content-stats.timer \
+            afterscroll-xfeed.service afterscroll-xfeed.timer \
             afterscroll-api.service; do
   render "$HERE/deploy/$unit" > "$UNIT_DIR/$unit"
 done
 
 systemctl --user daemon-reload
-systemctl --user enable --now saved-to-notes.service
-systemctl --user enable --now saved-to-notes-watchdog.timer
-systemctl --user enable --now saved-to-notes-digest.timer
-systemctl --user enable --now saved-to-notes-vaultsync.timer
-systemctl --user enable --now saved-to-notes-content-drafts.timer
-systemctl --user enable --now saved-to-notes-content-stats.timer
-systemctl --user enable --now saved-to-notes-xfeed.timer
+systemctl --user enable --now afterscroll.service
+systemctl --user enable --now afterscroll-watchdog.timer
+systemctl --user enable --now afterscroll-digest.timer
+systemctl --user enable --now afterscroll-vaultsync.timer
+systemctl --user enable --now afterscroll-content-drafts.timer
+systemctl --user enable --now afterscroll-content-stats.timer
+systemctl --user enable --now afterscroll-xfeed.timer
 # The app's API needs a token; make one the first time (never printed).
 grep -q '^APP_TOKEN=.' "$HERE/.env" 2>/dev/null \
   || echo "APP_TOKEN=$("$PYTHON" -c 'import secrets;print(secrets.token_urlsafe(32))')" >> "$HERE/.env"
@@ -61,8 +67,8 @@ if ! loginctl show-user "$(id -un)" 2>/dev/null | grep -q "Linger=yes"; then
 fi
 
 echo
-systemctl --user --no-pager status saved-to-notes.service | head -5
-systemctl --user --no-pager list-timers 'saved-to-notes-*' | head -5
+systemctl --user --no-pager status afterscroll.service | head -5
+systemctl --user --no-pager list-timers 'afterscroll-*' | head -5
 echo
-echo "  systemctl --user restart saved-to-notes    # after git pull"
-echo "  journalctl --user -u saved-to-notes -f     # live logs"
+echo "  systemctl --user restart afterscroll    # after git pull"
+echo "  journalctl --user -u afterscroll -f     # live logs"

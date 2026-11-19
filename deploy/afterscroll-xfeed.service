@@ -1,5 +1,5 @@
 [Unit]
-Description=saved-to-notes: hand new X bookmarks to the bot
+Description=Afterscroll: hand new X bookmarks to the bot
 
 [Service]
 Type=oneshot

@@ -1,5 +1,5 @@
 [Unit]
-Description=saved-to-notes: draft Russian remakes for newly ticked bookmarks
+Description=Afterscroll: draft Russian remakes for newly ticked bookmarks
 
 [Service]
 Type=oneshot
